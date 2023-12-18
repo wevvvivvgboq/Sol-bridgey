@@ -1,0 +1,169 @@
+// Import necessary libraries
+use solana_program::{
+    account_info::AccountInfo, entrypoint, entrypoint::ProgramResult, msg, pubkey::Pubkey, program,
+    program_pack::Pack, system_instruction,
+};
+
+// Define contract data structure
+#[repr(C)]
+pub struct SolanaLock {
+    pub owner: Pubkey,
+    pub locked_funds: u64,
+    pub locked_history: Vec<LockEvent>,
+}
+
+// Define a structure to represent lock events
+#[repr(C)]
+pub struct LockEvent {
+    pub user: Pubkey,
+    pub amount: u64,
+}
+
+// External address of the cross-chain bridge service
+const BRIDGE_SERVICE_ADDRESS: &str = "bridge_service_address";
+
+// Program entry point
+#[entrypoint]
+fn process_instruction(program_id: &Pubkey, accounts: &[AccountInfo], instruction_data: &[u8]) -> ProgramResult {
+    // Parse account information
+    let accounts_iter = &mut accounts.iter();
+    let solana_lock_account = next_account_info(accounts_iter)?;
+
+    // Check if the correct program owns the contract
+    if solana_lock_account.owner != program_id {
+        return Err(solana_program::program_error::ProgramError::IncorrectProgramId);
+    }
+
+    // Parse contract data
+    let mut solana_lock_data = SolanaLock::unpack(&solana_lock_account.data.borrow())?;
+
+    // Handle different operations based on the instruction
+    match instruction_data[0] {
+        0 => {
+            // Operation: Lock funds
+            lock_funds(accounts_iter, &mut solana_lock_data, instruction_data)?;
+        }
+        1 => {
+            // Operation: Unlock funds (through the external bridge service)
+            unlock_funds(accounts_iter, &mut solana_lock_data)?;
+        }
+        _ => {
+            // Invalid operation
+            return Err(solana_program::program_error::ProgramError::InvalidInstructionData);
+        }
+    }
+
+    // Update contract data
+    SolanaLock::pack(solana_lock_data, &mut solana_lock_account.data.borrow_mut())?;
+
+    Ok(())
+}
+
+// Helper function: Lock funds in Solana
+fn lock_funds<'a, 'b>(
+    accounts_iter: &mut impl Iterator<Item = &'a AccountInfo<'b>>,
+    solana_lock_data: &mut SolanaLock,
+    instruction_data: &[u8],
+) -> ProgramResult {
+    let user_account = next_account_info(accounts_iter)?;
+    let amount = u64::from_le_bytes(instruction_data[1..9].try_into().unwrap());
+
+    // Check if the user provided enough funds
+    let user_token_account = next_account_info(accounts_iter)?;
+    let token_balance = user_token_account.try_borrow_data()?;
+    let user_balance = u64::from_le_bytes(token_balance[0..8].try_into().unwrap());
+
+    if user_balance < amount {
+        return Err(solana_program::program_error::ProgramError::InsufficientFunds);
+    }
+
+    // Transfer funds to the contract account
+    let transfer_ix = solana_program::system_instruction::transfer(user_account.key, &solana_lock_account.key, amount);
+    solana_program::program::invoke(&[transfer_ix], accounts_iter)?;
+
+    // Update contract data
+    solana_lock_data.locked_funds += amount;
+
+    // Record lock event in history
+    solana_lock_data.locked_history.push(LockEvent {
+        user: *user_account.key,
+        amount,
+    });
+
+    Ok(())
+}
+
+// Helper function: Unlock funds through the external bridge service
+fn unlock_funds<'a, 'b>(
+    accounts_iter: &mut impl Iterator<Item = &'a AccountInfo<'b>>,
+    solana_lock_data: &mut SolanaLock,
+) -> ProgramResult {
+    let bridge_service_account = next_account_info(accounts_iter)?;
+
+    // Perform the cross-chain communication logic (simulated with a log message)
+    msg!("Unlocking funds on Solana. Triggering external bridge service...");
+
+    // You would typically call the external bridge service here
+    // with the necessary information to unlock funds on the other blockchain.
+
+    // Trigger the unlock callback
+    unlock_callback(accounts_iter, solana_lock_data)?;
+
+    Ok(())
+}
+
+// Helper function: Unlock callback (additional functionality)
+fn unlock_callback<'a, 'b>(
+    accounts_iter: &mut impl Iterator<Item = &'a AccountInfo<'b>>,
+    solana_lock_data: &mut SolanaLock,
+) -> ProgramResult {
+    // Additional functionality upon unlocking funds
+    msg!("Unlock callback executed.");
+
+    Ok(())
+}
+
+// Helper function: Parse account information
+fn next_account_info<'a, 'b>(
+    iter: &mut impl Iterator<Item = &'a AccountInfo<'b>>,
+) -> Result<&'a AccountInfo<'b>, ProgramResult> {
+    iter.next().ok_or_else(|| solana_program::program_error::ProgramError::NotEnoughAccountKeys)
+}
+
+// Helper function: Pack contract data into storage space
+impl Pack for SolanaLock {
+    const LEN: usize = 40;
+
+    fn unpack_from_slice(src: &[u8]) -> Result<Self, solana_program::program_error::ProgramError> {
+        let owner = Pubkey::new_from_array(<[u8; 32]>::try_from(&src[0..32]).unwrap());
+        let locked_funds = u64::from_le_bytes(src[32..40].try_into().unwrap());
+
+        Ok(SolanaLock {
+            owner,
+            locked_funds,
+            locked_history: Vec::new(),
+        })
+    }
+
+    fn pack_into_slice(&self, dst: &mut [u8]) {
+        dst[0..32].copy_from_slice(&self.owner.to_bytes());
+        dst[32..40].copy_from_slice(&self.locked_funds.to_le_bytes());
+    }
+}
+
+// Helper function: Pack lock event data into storage space
+impl Pack for LockEvent {
+    const LEN: usize = 40;
+
+    fn unpack_from_slice(src: &[u8]) -> Result<Self, solana_program::program_error::ProgramError> {
+        let user = Pubkey::new_from_array(<[u8; 32]>::try_from(&src[0..32]).unwrap());
+        let amount = u64::from_le_bytes(src[32..40].try_into().unwrap());
+
+        Ok(LockEvent { user, amount })
+    }
+
+    fn pack_into_slice(&self, dst: &mut [u8]) {
+        dst[0..32].copy_from_slice(&self.user.to_bytes());
+        dst[32..40].copy_from_slice(&self.amount.to_le_bytes());
+    }
+}
